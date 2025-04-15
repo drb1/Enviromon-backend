@@ -1,16 +1,20 @@
 services:
-  - type: web
-    name: enviromon
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 4 -k uvicorn.workers.UvicornWorker app:app
-    envVars:
-      - key: DATABASE_URL
-        value: sqlite:////app/data/sensor_data.db
-      - key: SERIAL_BRIDGE_URL
-        value: http://localhost:8001/serial
-      - key: USE_SERIAL_BRIDGE
-        value: true
-      - key: AZURE_IOT_HUB_CONNECTION_STRING
-        value: HostName=EnviroMonHub2025.azure-devices.net;DeviceId=CloudEnviroMon;SharedAccessKey=your_key_here
+    - type: web
+      name: enviromon
+      env: python
+      plan: free
+      buildCommand: pip install -r requirements.txt
+      startCommand: gunicorn -c gunicorn.conf.py main:app
+      envVars:
+        - key: DATABASE_URL
+          value: sqlite:////app/data/sensor_data.db
+        - key: SERIAL_BRIDGE_URL
+          value: https://91f2-2a02-6b67-e460-c500-f1aa-7a21-8cb3-216f.ngrok-free.app/serial
+        - key: USE_SERIAL_BRIDGE
+          value: true
+        - key: AZURE_IOT_HUB_CONNECTION_STRING
+          value: Endpoint=sb://iothub-ns-enviromon-65197121-d5a242f1bd.servicebus.windows.net/;SharedAccessKeyName=iothubowner;SharedAccessKey=v/58WaKpYYGNzqOKLrCjCSUW41GVdt9qZAIoTJRodkA=;EntityPath=enviromon
+      disks:
+        - name: data
+          mountPath: /app/data
+  ```

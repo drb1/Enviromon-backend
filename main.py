@@ -31,10 +31,12 @@ load_dotenv()
 # Load serial config from .env
 SERIAL_PORT = os.getenv("SERIAL_PORT")
 BAUD_RATE = int(os.getenv("BAUD_RATE", "9600"))
+USE_SERIAL = os.getenv("USE_SERIAL", "false").lower() == "true"
 
 # Serial Setup
-ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-time.sleep(2)  # Wait for Arduino to reboot
+if USE_SERIAL:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)  # Wait for Arduino to reboot
 
 # Store latest values
 latest_data = {"temperature": None, "humidity": None}

@@ -3,3 +3,6 @@ uvicorn
 python-dotenv
 pyserial
 sqlalchemy
+requests
+azure-iot-device
+gunicorn

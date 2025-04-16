@@ -9,7 +9,7 @@ CONNECTION_STRING = "HostName=Enviromon.azure-devices.net;DeviceId=Enviromon;Sha
 client = IoTHubDeviceClient.create_from_connection_string(CONNECTION_STRING)
 
 # Set up the serial port
-SERIAL_PORT = '/dev/cu.usbmodem101'
+SERIAL_PORT = '/dev/cu.usbmodem1101'
 BAUD_RATE = 9600
 ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
 time.sleep(2)

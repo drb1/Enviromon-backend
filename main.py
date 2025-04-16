@@ -16,11 +16,9 @@ from math import isnan
 
 # Load environment variables
 load_dotenv()
-print("Environment variables loaded")
 
 # SQLite setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///sensor_data.db")
-print(f"Using DATABASE_URL: {DATABASE_URL}")
 engine = create_engine(DATABASE_URL, echo=False, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine)
@@ -42,17 +40,12 @@ class Alert(Base):
     message = Column(String)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
-try:
-    Base.metadata.create_all(bind=engine)
-    print("Database tables created successfully")
-except Exception as e:
-    print(f"Database initialization error: {e}")
+Base.metadata.create_all(bind=engine)
 
 # Serial and Azure config
-SERIAL_BRIDGE_URL = os.getenv("SERIAL_BRIDGE_URL", "http://<raspberry_pi_ip>:8001/serial")
+SERIAL_BRIDGE_URL = os.getenv("SERIAL_BRIDGE_URL")
 AZURE_IOT_HUB_CONNECTION_STRING = os.getenv("AZURE_IOT_HUB_CONNECTION_STRING")
 USE_SERIAL_BRIDGE = os.getenv("USE_SERIAL_BRIDGE", "false").lower() == "true"
-print(f"Serial bridge config: URL={SERIAL_BRIDGE_URL}, Enabled={USE_SERIAL_BRIDGE}")
 
 # Store latest values
 latest_data = {
@@ -84,12 +77,11 @@ def read_serial_bridge():
     while True:
         try:
             if USE_SERIAL_BRIDGE:
-                print(f"Fetching from serial bridge: {SERIAL_BRIDGE_URL}")
                 response = requests.get(SERIAL_BRIDGE_URL, timeout=5)
                 if response.status_code == 200:
                     line = response.text.strip()
                     print(f"Serial bridge input: '{line}'")
-                    if line and not line.startswith('{"error":'):
+                    if line:
                         try:
                             parts = line.split(", ")
                             if len(parts) != 4:
@@ -167,10 +159,8 @@ def read_serial_bridge():
                         
                         except Exception as parse_err:
                             print(f"Parse error: {parse_err}")
-                    else:
-                        print(f"Invalid serial bridge response: {line}")
                 else:
-                    print(f"Serial bridge error: {response.status_code} - {response.text}")
+                    print(f"Serial bridge error: {response.status_code}")
             else:
                 print("Serial bridge disabled")
         
@@ -179,23 +169,18 @@ def read_serial_bridge():
         time.sleep(1)
 
 # Start serial reading thread
-try:
-    if USE_SERIAL_BRIDGE:
-        threading.Thread(target=read_serial_bridge, daemon=True).start()
-        print("Serial bridge thread started")
-    else:
-        print("Serial bridge communication disabled")
-except Exception as e:
-    print(f"Failed to start serial bridge thread: {e}")
+if USE_SERIAL_BRIDGE:
+    threading.Thread(target=read_serial_bridge, daemon=True).start()
+else:
+    print("Serial bridge communication disabled")
 
 # FastAPI App
 app = FastAPI()
-print("FastAPI app initialized")
 
 # CORS for Next.js
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://enviromon-frontend.vercel.app", "*"],
+    allow_origins=["http://localhost:3000", "https://<your_frontend_url>", "*"], # Update with frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -258,9 +243,3 @@ def get_alerts(limit: int = Query(10, ge=1, le=50), offset: int = Query(0, ge=0)
         return []
     finally:
         session.close()
-
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "serial_bridge_url": SERIAL_BRIDGE_URL}
-
-print(f"Starting FastAPI on 0.0.0.0:{os.getenv('PORT', '10000')}")

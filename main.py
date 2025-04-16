@@ -47,7 +47,7 @@ except Exception as e:
     print(f"Database initialization error: {e}")
 
 SERIAL_BRIDGE_URL = os.getenv("SERIAL_BRIDGE_URL", "http://<raspberry_pi_ip>:8001/serial")
-AZURE_IOT_HUB_CONNECTION_STRING = os.getenv("AZURE_IOT_HUB_CONNECTION_STRING")
+AZURE_IOT_HUB_CONNECTION_STRING ="Endpoint=sb://iothub-ns-enviromon-65197121-d5a242f1bd.servicebus.windows.net/;SharedAccessKeyName=iothubowner;SharedAccessKey=v/58WaKpYYGNzqOKLrCjCSUW41GVdt9qZAIoTJRodkA=;EntityPath=enviromon"
 print(f"Serial bridge config: URL={SERIAL_BRIDGE_URL}")
 
 THRESHOLDS = {

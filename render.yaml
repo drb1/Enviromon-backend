@@ -9,7 +9,7 @@ services:
         - key: DATABASE_URL
           value: sqlite:////app/data/sensor_data.db
         - key: SERIAL_BRIDGE_URL
-          value: https://91f2-2a02-6b67-e460-c500-f1aa-7a21-8cb3-216f.ngrok-free.app/serial
+          value: https://243c-2a02-6b67-e460-c500-3973-fdc1-c5df-8fc1.ngrok-free.app/serial
         - key: USE_SERIAL_BRIDGE
           value: true
         - key: AZURE_IOT_HUB_CONNECTION_STRING

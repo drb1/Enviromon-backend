@@ -6,3 +6,4 @@ sqlalchemy
 requests
 azure-iot-device
 gunicorn
+pytz

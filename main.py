@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Float, Integer, String, DateTime
 from sqlalchemy.ext.declarative import declarative_base
@@ -7,19 +7,22 @@ from datetime import datetime
 import requests
 import threading
 import os
-import time
 import json
 import asyncio
+import time
+import queue
 from dotenv import load_dotenv
 from azure.iot.device.aio import IoTHubDeviceClient
 from azure.iot.device import Message
 import sqlite3
 from math import isnan
+from datetime import timezone
+import pytz
 
 load_dotenv()
 print("Environment variables loaded")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///sensor_data.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////mnt/blob/sensor_data.db")
 print(f"Using DATABASE_URL: {DATABASE_URL}")
 engine = create_engine(DATABASE_URL, echo=False, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
 Base = declarative_base()
@@ -32,13 +35,13 @@ class SensorData(Base):
     humidity = Column(Float)
     light = Column(Integer)
     distance = Column(Integer)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Indian/Chagos")))
 
 class Alert(Base):
     __tablename__ = "alerts"
     id = Column(Integer, primary_key=True, index=True)
     message = Column(String)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Indian/Chagos")))
 
 try:
     Base.metadata.create_all(bind=engine)
@@ -47,7 +50,8 @@ except Exception as e:
     print(f"Database initialization error: {e}")
 
 SERIAL_BRIDGE_URL = os.getenv("SERIAL_BRIDGE_URL", "http://<raspberry_pi_ip>:8001/serial")
-AZURE_IOT_HUB_CONNECTION_STRING = "HostName=Enviromon.azure-devices.net;DeviceId=Enviromon;SharedAccessKey=x6lMFh9kzQCMCkKTBZYn2qi0/bmfSO3wQehiuukQ2Y0="
+AZURE_IOT_HUB_CONNECTION_STRING = os.getenv("AZURE_IOT_HUB_CONNECTION_STRING")
+print(f"Serial bridge config: URL={SERIAL_BRIDGE_URL}")
 
 THRESHOLDS = {
     "temp_high": 30.0,
@@ -55,16 +59,73 @@ THRESHOLDS = {
     "distance_close": 10
 }
 
-async def send_to_azure(data):
-    try:
-        client = IoTHubDeviceClient.create_from_connection_string(AZURE_IOT_HUB_CONNECTION_STRING)
-        await client.connect()
-        msg = Message(json.dumps(data))
-        await client.send_message(msg)
-        print(f"Sent to Azure: {msg.data}")
-        await client.disconnect()
-    except Exception as e:
-        print(f"Azure IoT Hub error: {e}")
+class AzureConnectionManager:
+    def __init__(self):
+        self.client = None
+        self.lock = threading.Lock()
+        self.message_queue = queue.Queue()
+        self.running = True
+
+    async def connect(self):
+        with self.lock:
+            if self.client and self.client.connected:
+                return True
+            try:
+                self.client = IoTHubDeviceClient.create_from_connection_string(
+                    AZURE_IOT_HUB_CONNECTION_STRING,
+                    connection_retry=True,
+                    connection_retry_interval=5
+                )
+                await self.client.connect()
+                print("Connected to Azure IoT Hub")
+                return True
+            except Exception as e:
+                print(f"Azure connection failed: {e}")
+                self.client = None
+                return False
+
+    async def send_message(self, data):
+        for attempt in range(3):
+            try:
+                if not await self.connect():
+                    self.message_queue.put(data)
+                    print("Queued message due to connection failure")
+                    return
+                msg = Message(json.dumps(data))
+                await self.client.send_message(msg)
+                print(f"Sent to Azure: {msg.data}")
+                return
+            except Exception as e:
+                print(f"Azure send attempt {attempt + 1} failed: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+                else:
+                    self.message_queue.put(data)
+                    print("Queued message after retries")
+        with self.lock:
+            if self.client:
+                await self.client.disconnect()
+                self.client = None
+
+    async def process_queue(self):
+        while self.running:
+            try:
+                if not self.message_queue.empty():
+                    data = self.message_queue.get()
+                    await self.send_message(data)
+            except Exception as e:
+                print(f"Queue processing error: {e}")
+            await asyncio.sleep(1)
+
+    async def shutdown(self):
+        self.running = False
+        with self.lock:
+            if self.client:
+                await self.client.disconnect()
+                self.client = None
+
+azure_manager = AzureConnectionManager()
+websocket_clients = set()
 
 def save_to_db(temp, hum, light, dist):
     for attempt in range(3):
@@ -103,6 +164,79 @@ def save_to_db(temp, hum, light, dist):
         finally:
             session.close()
 
+async def fetch_and_upload():
+    while True:
+        try:
+            print(f"Periodic fetch from serial bridge: {SERIAL_BRIDGE_URL}")
+            response = requests.get(SERIAL_BRIDGE_URL, timeout=5)
+            print(f"response={response}")
+            print(f"Serial bridge response: status={response.status_code}, text={response.text[:100]}")
+            if response.status_code != 200:
+                print(f"Serial bridge HTTP error: {response.status_code}")
+                await asyncio.sleep(10)
+                continue
+            
+            line = response.text.strip()
+            if line.startswith('{"error":'):
+                print(f"Serial bridge error: {json.loads(line)['error']}")
+                await asyncio.sleep(10)
+                continue
+            
+            clean_line = line.strip('"')
+            parts = clean_line.split(", ")
+            if len(parts) != 4:
+                print(f"Parse error: Expected 4 parts, got {len(parts)}: {clean_line}")
+                await asyncio.sleep(10)
+                continue
+            
+            try:
+                temp_str = parts[0].split(": ")[1].split(" ")[0]
+                hum_str = parts[1].split(": ")[1].split(" ")[0]
+                light_str = parts[2].split(": ")[1].split(" ")[0]
+                dist_str = parts[3].split(": ")[1].split(" ")[0]
+                
+                temp = round(float(temp_str), 1)
+                hum = round(float(hum_str), 1)
+                light = int(float(light_str))
+                dist = int(float(dist_str))
+            except (IndexError, ValueError) as e:
+                print(f"Parse error: {e}, input: {clean_line}")
+                await asyncio.sleep(10)
+                continue
+            
+            if isnan(temp) or isnan(hum) or light < 0 or dist < 0:
+                print(f"Invalid sensor values: temp={temp}, hum={hum}, light={light}, dist={dist}")
+                await asyncio.sleep(10)
+                continue
+            
+            timestamp = datetime.now(pytz.timezone("Indian/Chagos")).isoformat()
+            data = {
+                "temperature": temp,
+                "humidity": hum,
+                "light": light,
+                "distance": dist,
+                "timestamp": timestamp
+            }
+            print(f"Periodic upload → Temp: {temp} °C, Hum: {hum} %, Light: {light} %, Dist: {dist} cm")
+            
+            if AZURE_IOT_HUB_CONNECTION_STRING:
+                await azure_manager.send_message(data)
+            threading.Thread(target=save_to_db, args=(temp, hum, light, dist), daemon=True).start()
+            
+            # Broadcast to WebSocket clients
+            for client in list(websocket_clients):
+                try:
+                    await client.send_json(data)
+                except Exception as e:
+                    print(f"WebSocket broadcast error: {e}")
+                    websocket_clients.discard(client)
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Serial bridge network error: {e}")
+        except Exception as e:
+            print(f"Unexpected error in periodic upload: {e}")
+        await asyncio.sleep(10)  # Upload every 10 seconds
+
 app = FastAPI()
 print(f"FastAPI app initialized, binding to 0.0.0.0:{os.getenv('PORT', '10000')}")
 
@@ -114,11 +248,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_event():
+    if AZURE_IOT_HUB_CONNECTION_STRING:
+        asyncio.create_task(azure_manager.process_queue())
+        asyncio.create_task(fetch_and_upload())
+        print("Started Azure queue processor and periodic uploader")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await azure_manager.shutdown()
+    print("Shut down Azure connection")
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    websocket_clients.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # Keep connection alive
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+    finally:
+        websocket_clients.discard(websocket)
+
 @app.get("/api/latest")
 async def get_latest():
     try:
         print(f"Fetching from serial bridge: {SERIAL_BRIDGE_URL}")
-        response = requests.get(SERIAL_BRIDGE_URL, timeout=10)
+        response = requests.get(SERIAL_BRIDGE_URL, timeout=5)
         print(f"Serial bridge response: status={response.status_code}, text={response.text[:100]}")
         if response.status_code != 200:
             print(f"Serial bridge HTTP error: {response.status_code}")
@@ -157,15 +315,26 @@ async def get_latest():
                 "error": "Invalid data format"
             }
         
-        temp_str = parts[0].split(": ")[1].split(" ")[0]
-        hum_str = parts[1].split(": ")[1].split(" ")[0]
-        light_str = parts[2].split(": ")[1].split(" ")[0]
-        dist_str = parts[3].split(": ")[1].split(" ")[0]
-        
-        temp = float(temp_str)
-        hum = float(hum_str)
-        light = int(float(light_str))
-        dist = int(float(dist_str))
+        try:
+            temp_str = parts[0].split(": ")[1].split(" ")[0]
+            hum_str = parts[1].split(": ")[1].split(" ")[0]
+            light_str = parts[2].split(": ")[1].split(" ")[0]
+            dist_str = parts[3].split(": ")[1].split(" ")[0]
+            
+            temp = round(float(temp_str), 1)
+            hum = round(float(hum_str), 1)
+            light = int(float(light_str))
+            dist = int(float(dist_str))
+        except (IndexError, ValueError) as e:
+            print(f"Parse error: {e}, input: {clean_line}")
+            return {
+                "temperature": None,
+                "humidity": None,
+                "light": None,
+                "distance": None,
+                "timestamp": None,
+                "error": "Parse error"
+            }
         
         if isnan(temp) or isnan(hum) or light < 0 or dist < 0:
             print(f"Invalid sensor values: temp={temp}, hum={hum}, light={light}, dist={dist}")
@@ -178,7 +347,7 @@ async def get_latest():
                 "error": "Invalid sensor values"
             }
         
-        timestamp = datetime.utcnow().isoformat()
+        timestamp = datetime.now(pytz.timezone("Indian/Chagos")).isoformat()
         data = {
             "temperature": temp,
             "humidity": hum,
@@ -188,9 +357,8 @@ async def get_latest():
         }
         print(f"Parsed → Temp: {temp} °C, Hum: {hum} %, Light: {light} %, Dist: {dist} cm")
         
-        # Parallel tasks: Azure upload and DB save
         if AZURE_IOT_HUB_CONNECTION_STRING:
-            asyncio.create_task(send_to_azure(data))
+            asyncio.create_task(azure_manager.send_message(data))
         threading.Thread(target=save_to_db, args=(temp, hum, light, dist), daemon=True).start()
         
         return data

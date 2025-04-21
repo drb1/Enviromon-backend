@@ -35,13 +35,13 @@ class SensorData(Base):
     humidity = Column(Float)
     light = Column(Integer)
     distance = Column(Integer)
-    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Indian/Chagos")))
+    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Europe/London")))
 
 class Alert(Base):
     __tablename__ = "alerts"
     id = Column(Integer, primary_key=True, index=True)
     message = Column(String)
-    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Indian/Chagos")))
+    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Europe/London")))
 
 try:
     Base.metadata.create_all(bind=engine)
@@ -213,7 +213,7 @@ async def fetch_and_upload():
                 await asyncio.sleep(10)
                 continue
             
-            timestamp = datetime.now(pytz.timezone("Indian/Chagos")).isoformat()
+            timestamp = datetime.now(pytz.timezone("Europe/London")).isoformat()
             data = {
                 "temperature": temp,
                 "humidity": hum,
@@ -348,7 +348,7 @@ async def get_latest():
                 "error": "Invalid sensor values"
             }
         
-        timestamp = datetime.now(pytz.timezone("Indian/Chagos")).isoformat()
+        timestamp = datetime.now(pytz.timezone("Europe/London")).isoformat()
         data = {
             "temperature": temp,
             "humidity": hum,

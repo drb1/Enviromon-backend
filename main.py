@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from sqlalchemy import create_engine, Column, Float, Integer, String, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 import requests
 import threading
@@ -22,7 +22,7 @@ import pytz
 load_dotenv()
 print("Environment variables loaded")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////mnt/blob/sensor_data.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///sensor_data.db" if os.getenv("ENV") == "local" else "sqlite:////mnt/blob/sensor_data.db")
 print(f"Using DATABASE_URL: {DATABASE_URL}")
 engine = create_engine(DATABASE_URL, echo=False, connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {})
 Base = declarative_base()
@@ -35,13 +35,13 @@ class SensorData(Base):
     humidity = Column(Float)
     light = Column(Integer)
     distance = Column(Integer)
-    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Europe/London")))
+    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Indian/Chagos")))
 
 class Alert(Base):
     __tablename__ = "alerts"
     id = Column(Integer, primary_key=True, index=True)
     message = Column(String)
-    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Europe/London")))
+    timestamp = Column(DateTime, default=lambda: datetime.now(pytz.timezone("Indian/Chagos")))
 
 try:
     Base.metadata.create_all(bind=engine)
@@ -49,8 +49,9 @@ try:
 except Exception as e:
     print(f"Database initialization error: {e}")
 
-SERIAL_BRIDGE_URL = os.getenv("SERIAL_BRIDGE_URL", "http://<raspberry_pi_ip>:8001/serial")
+SERIAL_BRIDGE_URL = os.getenv("SERIAL_BRIDGE_URL", "http://localhost:8001/serial")
 AZURE_IOT_HUB_CONNECTION_STRING = os.getenv("AZURE_IOT_HUB_CONNECTION_STRING")
+API_KEY = os.getenv("API_KEY")
 print(f"Serial bridge config: URL={SERIAL_BRIDGE_URL}")
 
 THRESHOLDS = {
@@ -123,6 +124,7 @@ class AzureConnectionManager:
             if self.client:
                 await self.client.disconnect()
                 self.client = None
+                print("Shut down Azure connection")
 
 azure_manager = AzureConnectionManager()
 websocket_clients = set()
@@ -148,7 +150,7 @@ def save_to_db(temp, hum, light, dist):
                 session.add(alert)
             
             session.commit()
-            print(f"Saved → Temp: {temp} °C, Hum: {hum} %, Light: {light} %, Dist: {dist} cm")
+            print(f"Saved to Blob SQLite → Temp: {temp} °C, Hum: {hum} %, Light: {light} %, Dist: {dist} cm")
             break
         except sqlite3.OperationalError as db_err:
             print(f"Database error (attempt {attempt + 1}): {db_err}")
@@ -168,8 +170,8 @@ async def fetch_and_upload():
     while True:
         try:
             print(f"Periodic fetch from serial bridge: {SERIAL_BRIDGE_URL}")
-            response = requests.get(SERIAL_BRIDGE_URL, timeout=5)
-            print(f"response={response}")
+            headers = {"X-API-Key": API_KEY} if API_KEY else {}
+            response = requests.get(SERIAL_BRIDGE_URL, timeout=5, headers=headers)
             print(f"Serial bridge response: status={response.status_code}, text={response.text[:100]}")
             if response.status_code != 200:
                 print(f"Serial bridge HTTP error: {response.status_code}")
@@ -178,7 +180,8 @@ async def fetch_and_upload():
             
             line = response.text.strip()
             if line.startswith('{"error":'):
-                print(f"Serial bridge error: {json.loads(line)['error']}")
+                error_data = json.loads(line)
+                print(f"Serial bridge error: {error_data['error']}")
                 await asyncio.sleep(10)
                 continue
             
@@ -223,7 +226,6 @@ async def fetch_and_upload():
                 await azure_manager.send_message(data)
             threading.Thread(target=save_to_db, args=(temp, hum, light, dist), daemon=True).start()
             
-            # Broadcast to WebSocket clients
             for client in list(websocket_clients):
                 try:
                     await client.send_json(data)
@@ -235,10 +237,19 @@ async def fetch_and_upload():
             print(f"Serial bridge network error: {e}")
         except Exception as e:
             print(f"Unexpected error in periodic upload: {e}")
-        await asyncio.sleep(10)  # Upload every 10 seconds
+        await asyncio.sleep(10)
 
-app = FastAPI()
-print(f"FastAPI app initialized, binding to 0.0.0.0:{os.getenv('PORT', '10000')}")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if AZURE_IOT_HUB_CONNECTION_STRING:
+        task1 = asyncio.create_task(azure_manager.process_queue())
+        task2 = asyncio.create_task(fetch_and_upload())
+        print("Started Azure queue processor and periodic uploader")
+    yield
+    await azure_manager.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+print(f"FastAPI app initialized, binding to 0.0.0.0:{os.getenv('PORT', '8000')}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -248,25 +259,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-async def startup_event():
-    if AZURE_IOT_HUB_CONNECTION_STRING:
-        asyncio.create_task(azure_manager.process_queue())
-        asyncio.create_task(fetch_and_upload())
-        print("Started Azure queue processor and periodic uploader")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await azure_manager.shutdown()
-    print("Shut down Azure connection")
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     websocket_clients.add(websocket)
     try:
         while True:
-            await websocket.receive_text()  # Keep connection alive
+            await websocket.receive_text()
     except Exception as e:
         print(f"WebSocket error: {e}")
     finally:
@@ -276,7 +275,8 @@ async def websocket_endpoint(websocket: WebSocket):
 async def get_latest():
     try:
         print(f"Fetching from serial bridge: {SERIAL_BRIDGE_URL}")
-        response = requests.get(SERIAL_BRIDGE_URL, timeout=5)
+        headers = {"X-API-Key": API_KEY} if API_KEY else {}
+        response = requests.get(SERIAL_BRIDGE_URL, timeout=5, headers=headers)
         print(f"Serial bridge response: status={response.status_code}, text={response.text[:100]}")
         if response.status_code != 200:
             print(f"Serial bridge HTTP error: {response.status_code}")
@@ -347,7 +347,7 @@ async def get_latest():
                 "error": "Invalid sensor values"
             }
         
-        timestamp = datetime.now(pytz.timezone("Europe/London")).isoformat()
+        timestamp = datetime.now(pytz.timezone("Indian/Chagos")).isoformat()
         data = {
             "temperature": temp,
             "humidity": hum,

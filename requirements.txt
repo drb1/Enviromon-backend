@@ -7,3 +7,4 @@ requests
 azure-iot-device
 gunicorn
 pytz
+opencensus-ext-azure

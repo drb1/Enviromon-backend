@@ -50,7 +50,8 @@ except Exception as e:
     print(f"Database initialization error: {e}")
 
 SERIAL_BRIDGE_URL = os.getenv("SERIAL_BRIDGE_URL", "http://localhost:8001/serial")
-AZURE_IOT_HUB_CONNECTION_STRING = os.getenv("AZURE_IOT_HUB_CONNECTION_STRING")
+AZURE_IOT_HUB_CONNECTION_STRING ="HostName=Enviromon.azure-devices.net;DeviceId=Enviromon;SharedAccessKey=x6lMFh9kzQCMCkKTBZYn2qi0/bmfSO3wQehiuukQ2Y0="
+#AZURE_IOT_HUB_CONNECTION_STRING = os.getenv("AZURE_IOT_HUB_CONNECTION_STRING")
 API_KEY = os.getenv("API_KEY")
 print(f"Serial bridge config: URL={SERIAL_BRIDGE_URL}")
 
